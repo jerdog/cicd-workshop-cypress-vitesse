@@ -1,23 +1,44 @@
 version: 2.1
 
-jobs:
-  build:
+orbs:
+  node: circleci/node@5.0.3
+
+executors:
+  node_docker:
     docker: 
       - image: cimg/node:16.16.0
+
+jobs:
+  build:
+    executor: node_docker
     steps:
       - checkout
+      - node/install-packages
       - run:
           command: |
-            npm install
+            npm run build 
+  test:
+    executor: node_docker
+    steps:
+      - checkout
+      - node/install-packages
+      - run:
+          command: |
+            npm run test-ci
+  lint:
+    executor: node_docker
+    steps:
+      - checkout
+      - node/install-packages
       - run:
           command: |
             npm run lint
-            npm run test-ci
-            npm run build 
             
 workflows:
   build_test_deploy:
       jobs:
-        - build      
+        - build  
+        - lint
+        - test   
 
 # VS Code Extension Version: 1.0.2
