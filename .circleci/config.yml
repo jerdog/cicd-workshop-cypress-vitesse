@@ -2,6 +2,25 @@ version: 2.1
 
 orbs:
   node: circleci/node@5.0.3
+  docker: circleci/docker@2.1.4
+  snyk: snyk/snyk@1.4.0
+  terraform: circleci/terraform@3.2.0
+
+commands:
+  install_doctl:
+    parameters:
+      version:
+        default: 1.79.0
+        type: string
+    steps:
+      - run:
+          name: Install doctl client
+          command: |
+            cd ~
+            wget https://github.com/digitalocean/doctl/releases/download/v<<parameters.version>>/doctl-<<parameters.version>>-linux-amd64.tar.gz
+            tar xf ~/doctl-<<parameters.version>>-linux-amd64.tar.gz
+            sudo mv ~/doctl /usr/local/bin
+
 
 executors:
   node_docker:
@@ -43,12 +62,88 @@ jobs:
       - run:
           command: |
             npm run lint
+
+
+  build_docker_image:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - docker/check
+      - docker/build:
+          image: $DOCKER_LOGIN/$CIRCLE_PROJECT_REPONAME
+          tag: 0.1.<< pipeline.number >>
+      - snyk/scan:
+          fail-on-issues: false
+          monitor-on-build: false
+          target-file: Dockerfile
+          docker-image-name: $DOCKER_LOGIN/$CIRCLE_PROJECT_REPONAME:0.1.<< pipeline.number >>
+          project: ${CIRCLE_PROJECT_REPONAME}/${CIRCLE_BRANCH}-app
+      - docker/push:
+          image: $DOCKER_LOGIN/$CIRCLE_PROJECT_REPONAME
+          tag: 0.1.<< pipeline.number >>
+  
+  dependency_vulnerability_scan:
+    docker:
+      - image: cimg/node:16.16.0
+    steps:
+      - checkout
+      - node/install-packages
+      - snyk/scan:
+          fail-on-issues: true
+          monitor-on-build: false
+
+  create_do_k8s_cluster:
+    docker:
+      - image: cimg/node:16.16.0
+    steps:
+      - checkout
+      - install_doctl:
+          version: 1.78.0
+      - run:
+          name: Create .terraformrc file locally
+          command: echo "credentials \"app.terraform.io\" {token = \"$TF_CLOUD_KEY\"}" > $HOME/.terraformrc
+      - terraform/install:
+          terraform_version: 1.0.6
+          arch: amd64
+          os: linux
+      - terraform/init:
+          path: ./terraform/do_create_k8s
+      - run:
+          name: Create K8s Cluster on DigitalOcean
+          command: |
+            export CLUSTER_NAME=${CIRCLE_PROJECT_USERNAME}-${CIRCLE_PROJECT_REPONAME}
+            export DO_K8S_SLUG_VER="$(doctl kubernetes options versions \
+              -o json -t $DIGITALOCEAN_TOKEN | jq -r '.[0] | .slug')"
+
+            terraform -chdir=./terraform/do_create_k8s apply \
+              -var do_token=$DIGITALOCEAN_TOKEN \
+              -var cluster_name=$CLUSTER_NAME \
+              -var do_k8s_slug_ver=$DO_K8S_SLUG_VER \
+              -auto-approve
             
 workflows:
   build_test_deploy:
       jobs:
         - build  
         - lint
-        - test   
+        - test  
+        - build_docker_image:
+            context:
+              - cicd-workshop 
+        - dependency_vulnerability_scan:
+            context:
+              - cicd-workshop 
+        - create_do_k8s_cluster:
+            context:
+              - cicd-workshop
+            requires:
+              - build
+              - lint
+              - test
+              - dependency_vulnerability_scan
+              - build_docker_image
 
 # VS Code Extension Version: 1.0.2
